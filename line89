@@ -1,0 +1,99 @@
+//Parameters
+real L = 4; 
+real W = 1;
+real E1 = 3e9;
+real E0 = 1e-9*E1;
+real nu =0.4;
+real fx = 0;
+real fy= -3e7;
+real fxa = 0;
+real fya = fy;
+real volfrac =0.5;
+real p = 1;
+real chg = 1;
+real alpha=0.002;
+int s = 1;
+int i = 0;
+int Imax =100;
+//Border:Cantileverint 
+int loaded=1,free =2,fixed=3;
+border b1(t=-0.025*W,0.025*W){x=0.5*L; y=t;		label = loaded;}
+border b2(t=0.025*W,0.5*W)   {x=0.5*L; y=t;		label = free;}
+border b3(t=0.5*L,-0.5*L)    {x=t;     y= 0.5*W;label = free;}
+border b4(t=0.5*W,-0.5*W)	 {x=-0.5*L;y=t;		label = fixed;}
+border b5(t = -0.5*L,0.5*L)	 {x=t;     y=-0.5*W;label = free;}
+border b6(t=-0.5*W,-0.025*W) {x=0.5*L; y=t;		label = free;}
+//Mesh
+mesh th=buildmesh(b1(2*s)+b2(24*s)+ b3(200*s)+b4(50*s)+b5(200*s)+b6(24*s));
+//Fespace
+fespace Vh(th,[P1,P1]);
+Vh [ux,uy],[vx,vy],[uxd,uyd],[uxa, uya],[vxa,vya],[uxn,uyn];
+fespace Vh1(th,P1);
+Vh1 E,theta,thetaold,thetanew,dtheta,sens,sensn,sensv;
+//Make intial design
+theta = volfrac;
+E=theta^p*(E1-E0)+E0;//Form D matrix
+real lambda =nu/((1+nu)*(1-2*nu));
+real mu = 1/(2*(1+nu));
+real a11=2*mu+lambda,a12=0,a13=lambda;
+real a22=mu,a23=0;
+real a33 =2*mu +lambda ;
+func D=[[a11,a12,a13],[ a12,a22,a23],[ a13,a23,a33]];
+//Macros
+macro el(x1,x2) [dx(x1),(dx(x2)+dy(x1)),dy(x2)]//
+macro enl(x1,x2) [(dx(x1)*dx(x1)+dx(x2)*dx(x2))/2,(dx(x1)*dy(x1)+dx(x2)*dy(x2)),(dy(x1)*dy(x1)+dy(x2)*dy(x2))/2]//
+macro denl(x1,x2,x3,x4) [(dx(x1)*dx(x3)+dx(x2)*dx(x4)),(dx(x1)*dy(x3)+dx(x2)*dy(x4)+dx(x3)*dy(x1)+dx(x4)*dy(x2)),(dy(x1)*dy(x3)+dy(x2)*dy(x4))]//
+macro e(x1,x2) (el(x1,x2)+enl(x1,x2))//
+macro de(x1,x2,x3,x4) (el(x3,x4)+ denl(x1,x2,x3,x4))//
+while(chg>1e-3 && i<= Imax){
+	i =i+1;thetaold =theta;
+	p=min(3.,p+(i%5==0)*0.2);
+	//Nonlinear finite element analysis
+	[ux,uy]=[0,0];[uxd,uyd]=[0,0];
+	for (int iner=1;iner<= 30;iner ++){
+		cout<<"Nonlinear FEA inner loop "<<iner<<"starts..."<< endl;
+		solve nonlinear([uxd,uyd],[vx,vy])
+			=int2d(th)(
+			E*(de(ux,uy,uxd,uyd)' *D* de(ux,uy,vx,vy) )+
+			(e(ux,uy)'*D*denl(vx,vy,uxd,uyd)))
+			+ int2d(th)(E*((e(ux,uy)'*D*de(ux,uy,vx,vy))))
+			-int1d(th,loaded)(fx*vx+ fy*vy)
+			+on(fixed,uxd=0,uyd=0);
+		if(iner == 1) real ress =uxd[].linfty;
+		real res = uxd[].linfty;
+		[ux,uy]=[ux + uxd,uy + uyd];
+		cout<<"......Linfty residual ="<<res<< endl;
+		if(res<1e-3*ress) break;
+	}
+	//Adjoint equation
+	[uxn,uyn]=[-ux,-uy];
+	solve nladjoint([uxa,uya],[vxa,vya])=
+			int2d(th)(E*(de(uxn,uyn,uxa,uya)' *D*de(uxn,uyn,vxa,vya) )
+			+(e(uxn,uyn)'*D*denl(vxa,vya,uxa,uya)))
+			- int1d(th,loaded)(fxa*vxa +fya*vya)+ on(fixed,uxa =0,uya =0);
+	//Sensitivity and smoothing
+	sens =-p*theta^(p-1)*(E1-E0)*((el(uxa,uya))'*D*(e(ux,uy)));
+	solve smoothing(sensn,sensv)=int2d(th)(alpha*(dx(sensn)*dx(sensv)+dy(sensn)*dy(sensv))+ sensn*sensv)-int2d(th)(sens*sensv);
+	//0C update
+	real l1=0;
+	real l2=100000;
+	real move =0.1;
+	while((l2-l1)/(l2+l1)>(1e-4)&&l2>1e-40) 
+	{
+		real lmid =0.5*(l2+l1);
+		thetanew =max(0.,max(theta-move,min(1.,min(theta +move,theta*(max(1e-10,-sensn/lmid))^0.3))));
+		if ((int2d(th)(thetanew)-int2d(th)(volfrac))>0){
+			l1 = lmid;}
+		else{
+			l2 = lmid;}
+	}
+	theta = thetanew;
+	E=theta^p*(E1-E0)+ E0;
+	//0bjective functions and visualization
+	real j= int1d(th,loaded)(fx*ux + fy*uy);
+	real vol = int2d(th)(theta)/int2d(th)(1);
+	dtheta =abs(theta-thetaold);
+	chg = dtheta[].max;
+	plot(theta,fill =1);
+	cout <<"iter = "<< i <<";comp = "<<j<<";Vol = "<<vol<<";change ="<<chg <<"------------"<<endl;
+	}
